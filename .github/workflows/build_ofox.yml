@@ -112,7 +112,10 @@ jobs:
           source build/envsetup.sh
           lunch orangefox_HWDBY-eng
           mka recoveryimage -j"$(nproc --all)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-          ls -l out/target/product/HWDBY/recovery.img
+          echo "=== 产物大小 ==="
+          ls -l out/target/product/HWDBY/recovery.img || true
+          ls -l out/target/product/HWDBY/ramdisk-recovery.img || true
+          ls -l out/target/product/HWDBY/ramdisk-recovery.img.gz 2>/dev/null || true
 
       - name: 上传编译日志（失败时也能看）
         if: always()
@@ -122,9 +125,13 @@ jobs:
           path: build.log
           if-no-files-found: warn
 
-      - name: 上传 recovery.img
+      - name: 上传 recovery.img（含 ramdisk，便于按本机格式重打包）
         uses: actions/upload-artifact@v4
         with:
           name: recovery-HWDBY
-          path: ~/tree/out/target/product/HWDBY/recovery.img
+          path: |
+            ~/tree/out/target/product/HWDBY/recovery.img
+            ~/tree/out/target/product/HWDBY/ramdisk-recovery.img
+            ~/tree/out/target/product/HWDBY/ramdisk-recovery.img.gz
+            ~/tree/out/target/product/HWDBY/kernel
           if-no-files-found: warn
