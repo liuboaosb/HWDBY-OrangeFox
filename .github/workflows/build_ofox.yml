@@ -1,24 +1,29 @@
 name: Build OrangeFox Recovery (HWDBY)
 
-# 云端编译：不需要本机 Linux / 不需要 BIOS 虚拟化 / 不占用本地磁盘
+# 云端编译：不需要本机 Linux / 不需要 BIOS 虚拟化 / 不占用本地磁盘。
 # 仓库里只需要两个文件：
 #   1) .github/workflows/build_ofox.yml   (本文件)
-#   2) HWDBY_device_tree.zip              (设备树，21.6 MB，网页可直接上传)
-# 用法：Actions → Build OrangeFox Recovery (HWDBY) → Run workflow → 等编译完成 → 下载 Artifacts
+#   2) HWDBY_device_tree.zip              (设备树，21.6 MB)
+#
+# 修正记录（第一次运行失败：OrangeFox/sync 没有 11.0 分支）：
+#   设备树的 orangefox_HWDBY.mk 只 inherit 了 vendor/twrp/config/common.mk，
+#   并不需要 vendor/orangefox，所以用 TWRP 的 AOSP 清单 + twrp-11 分支即可。
+#   清单：https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+#   分支：twrp-11 / twrp-12.1 / twrp-14.1
 
 on:
   workflow_dispatch:
     inputs:
       source:
-        description: '源码清单: orangefox 或 twrp'
+        description: '源码清单种类（保持 twrp 即可）'
         required: true
-        default: 'orangefox'
+        default: 'twrp'
         type: choice
-        options: [orangefox, twrp]
+        options: [twrp, orangefox]
       branch:
-        description: '分支（orangefox 建议 11.0；twrp 建议 android-11）'
+        description: '安卓版本（11 / 12.1 / 14.1），留 11 即可'
         required: true
-        default: '11.0'
+        default: '11'
 
 jobs:
   build:
@@ -55,7 +60,6 @@ jobs:
           if [ -f HWDBY_device_tree.zip ]; then
             unzip -q HWDBY_device_tree.zip -d "$HOME/devtree"
           else
-            # 若已经解压成 device/ 目录放在仓库里，也支持
             mkdir -p "$HOME/devtree/device"
             cp -a device/huawei "$HOME/devtree/device/" 2>/dev/null || true
           fi
@@ -69,11 +73,13 @@ jobs:
           BR: ${{ inputs.branch }}
         run: |
           set -e
-          if [ "$SRC" = "orangefox" ]; then
-            MANIFEST="https://gitlab.com/OrangeFox/sync.git"
-          else
-            MANIFEST="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_omni.git"
-          fi
+          # 分支名归一化：11 -> twrp-11 等
+          case "$BR" in
+            11|11.0|android-11|twrp-11)   BR="twrp-11" ;;
+            12|12.1|android-12.1)         BR="twrp-12.1" ;;
+            14|14.1|android-14.1)         BR="twrp-14.1" ;;
+          esac
+          MANIFEST="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git"
           echo "manifest=$MANIFEST branch=$BR"
           git config --global user.name  "ci-builder"
           git config --global user.email "ci@local"
@@ -110,3 +116,4 @@ jobs:
         with:
           name: recovery-HWDBY
           path: ~/tree/out/target/product/HWDBY/recovery.img
+          if-no-files-found: warn
