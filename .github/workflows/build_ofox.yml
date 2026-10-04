@@ -73,13 +73,24 @@ jobs:
           BR: ${{ inputs.branch }}
         run: |
           set -e
-          # 分支名归一化：11 -> twrp-11 等
-          case "$BR" in
-            11|11.0|android-11|twrp-11)   BR="twrp-11" ;;
-            12|12.1|android-12.1)         BR="twrp-12.1" ;;
-            14|14.1|android-14.1)         BR="twrp-14.1" ;;
-          esac
-          MANIFEST="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git"
+          # 分支名归一化
+          if [ "$SRC" = "orangefox" ]; then
+            # 橙狐清单：已无 fox_11.0，退到 default（最新分支）
+            MANIFEST="https://gitlab.com/OrangeFox/Manifest.git"
+            case "$BR" in
+              11|11.0|android-11|default)   BR="default" ;;
+              16|16.0|fox_16.0)             BR="fox_16.0" ;;
+              9|9.0|fox_9.0)                BR="fox_9.0" ;;
+            esac
+          else
+            # TWRP AOSP 清单：有 twrp-11（Android 11，与本设备树匹配）
+            MANIFEST="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git"
+            case "$BR" in
+              11|11.0|android-11|twrp-11)   BR="twrp-11" ;;
+              12|12.1|android-12.1)         BR="twrp-12.1" ;;
+              14|14.1|android-14.1)         BR="twrp-14.1" ;;
+            esac
+          fi
           echo "manifest=$MANIFEST branch=$BR"
           git config --global user.name  "ci-builder"
           git config --global user.email "ci@local"
