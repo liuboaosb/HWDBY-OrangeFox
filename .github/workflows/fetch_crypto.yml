@@ -1,0 +1,64 @@
+name: Fetch crypto mini files from a run
+
+# 用途：某个编译 run 的产物很大（recovery.img + kernel + ramdisk ≈ 87 MB），
+# 但本地真正需要的只有 crypto-run.tgz 里的几个小文件（twrpfbe + libtwrpfscrypt + libfscrypt）。
+# 这个工作流不编译任何东西，只让 GitHub 的机器把大产物拉下来、挑出小文件再上传，
+# 本地就能只下载几百 KB。支持重复运行（默认对着 37613451565 这个 run）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '源编译 run 的 id（产物名必须是 recovery-HWDBY）'
+        required: true
+        default: '37613451565'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: 从指定 run 拉取大产物
+        uses: actions/download-artifact@v4
+        with:
+          name: recovery-HWDBY
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: art
+
+      - name: 解包并挑出需要的文件
+        run: |
+          set -e
+          ls -l art
+          ls -l art/crypto-run.tgz
+          tar -xzf art/crypto-run.tgz -C .
+          echo "===== crypto-run 内容 ====="
+          ls -l crypto-run/system/bin || true
+          echo "===== 关键文件 ====="
+          for f in twrpfbe libtwrpfscrypt.so libfscrypt.so; do
+            find crypto-run -name "$f" -exec ls -l {} \; || true
+          done
+          mkdir -p mini/system/bin mini/system/lib64
+          cp crypto-run/system/bin/twrpfbe mini/system/bin/
+          for f in twrpfbe recovery keystore keystore_auth fscryptpolicyget linker64; do
+            if [ -f "crypto-run/system/bin/$f" ]; then cp "crypto-run/system/bin/$f" mini/system/bin/; fi
+          done
+          cp crypto-run/system/lib64/libtwrpfscrypt.so mini/system/lib64/
+          cp crypto-run/system/lib64/libfscrypt.so     mini/system/lib64/ 2>/dev/null || true
+          cp crypto-run/recovery.fstab mini/recovery.fstab 2>/dev/null || true
+          tar -czf crypto-mini.tgz mini
+          ls -l crypto-mini.tgz
+          echo "===== mini 内容 ====="
+          tar -tzf crypto-mini.tgz
+          echo "===== twrpfbe 的 sha256 / md5（便于本地校验）====="
+          sha256sum mini/system/bin/twrpfbe
+          md5sum mini/system/bin/twrpfbe crypto-mini.tgz
+          echo "===== 需要的库闭包（mini 里没带的，本地从旧包拿）====="
+          strings -a mini/system/bin/twrpfbe | grep -E '^lib.*\.so$' | sort -u || true
+
+      - name: 上传小包
+        uses: actions/upload-artifact@v4
+        with:
+          name: crypto-mini
+          path: crypto-mini.tgz
+          if-no-files-found: error
