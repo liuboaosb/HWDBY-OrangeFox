@@ -5,11 +5,11 @@ name: Build OrangeFox Recovery (HWDBY)
 #   1) .github/workflows/build_ofox.yml   (本文件)
 #   2) HWDBY_device_tree.zip              (设备树，21.6 MB)
 #
-# v2 (crypto 版): 设备树已加 TW_INCLUDE_CRYPTO := true + recovery.fstab 的 /data
-#   加密标志 (fileencryption=ice;wrappedkey;keydirectory=/data/unencrypted)。
-#   本文件新增两步：
-#     - "dump crypto 配置": 把进入编译的 crypto 相关旗标打进日志（即使编译失败也能看）
-#     - "校验产物确实带 crypto": 在 recovery 二进制与 ramdisk 里找 FBE/keystore 痕迹
+# v3 (crypto 修正版):
+#   * 安卓 11 的 fscrypt 策略是 **v1**，TWRP 不显式设 TW_USE_FSCRYPT_POLICY 时会按 v2 编，
+#     密钥/策略结构对不上 => 解密必失败。本版强制 TW_USE_FSCRYPT_POLICY := 1。
+#   * 老树的 fscrypt Android.mk 里没有 twrpfbe 模块（产物里只有 fscryptpolicyget/keystore_auth），
+#     本版自动把 twrpfbe 模块补进去并单独编译，同时把运行所需的库/二进制打成 crypto-run.tgz。
 #
 # 清单：https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
 # 分支：twrp-11 / twrp-12.1 / twrp-14.1
@@ -68,7 +68,6 @@ jobs:
           fi
           find "$HOME/devtree" -maxdepth 3 -type d | sort
           ls -l "$HOME/devtree/device/huawei/HWDBY"
-          ls -l "$HOME/devtree/device/huawei/HWDBY/prebuilt"
 
       - name: dump 设备树里的 crypto 配置
         run: |
@@ -83,9 +82,7 @@ jobs:
           BR: ${{ inputs.branch }}
         run: |
           set -e
-          # 分支名归一化
           if [ "$SRC" = "orangefox" ]; then
-            # 橙狐清单：已无 fox_11.0，退到 default（最新分支）
             MANIFEST="https://gitlab.com/OrangeFox/Manifest.git"
             case "$BR" in
               11|11.0|android-11|default)   BR="default" ;;
@@ -93,7 +90,6 @@ jobs:
               9|9.0|fox_9.0)                BR="fox_9.0" ;;
             esac
           else
-            # TWRP AOSP 清单
             MANIFEST="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git"
             case "$BR" in
               11|11.0|android-11|twrp-11)   BR="twrp-11" ;;
@@ -107,16 +103,70 @@ jobs:
           mkdir -p "$HOME/tree" && cd "$HOME/tree"
           repo init --depth=1 -u "$MANIFEST" -b "$BR"
           repo sync -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags
-          echo "===== 源码树里的 crypto 旗标处理 ====="
-          grep -rn "TW_INCLUDE_CRYPTO" vendor/twrp/config/*.mk bootable/recovery/Android.mk 2>/dev/null | head -40 || true
-          echo "===== 源码树里的 crypto/fscrypt 目录 ====="
+          echo "===== fscrypt 目录 ====="
           ls bootable/recovery/crypto 2>/dev/null || true
-          ls bootable/recovery/crypto/fscrypt 2>/dev/null | head -40 || true
+          find bootable/recovery -path '*fscrypt*' -name 'Android.mk' 2>/dev/null || true
 
       - name: 放入设备树
         run: |
           cp -a "$HOME/devtree/device/huawei" "$HOME/tree/device/"
           ls -l "$HOME/tree/device/huawei/HWDBY"
+
+      - name: 修正 crypto 旗标（安卓11 必须 fscrypt V1）并补 twrpfbe 模块
+        run: |
+          set -e
+          cd "$HOME/tree"
+          B=device/huawei/HWDBY/BoardConfig.mk
+          grep -q 'TW_INCLUDE_CRYPTO' "$B" || echo 'TW_INCLUDE_CRYPTO := true' >> "$B"
+          grep -q 'TW_INCLUDE_FBE'    "$B" || echo 'TW_INCLUDE_FBE := true' >> "$B"
+          if ! grep -q 'TW_USE_FSCRYPT_POLICY' "$B"; then
+            {
+              echo ''
+              echo '# HWDBY: 安卓11(sdk30) 用 fscrypt 策略 v1；不设的话 TWRP 按 v2 编，解密必失败'
+              echo 'TW_USE_FSCRYPT_POLICY := 1'
+            } >> "$B"
+          fi
+          echo "===== 修正后的 crypto 旗标 ====="
+          grep -n -E 'TW_INCLUDE_CRYPTO|TW_INCLUDE_FBE|TW_USE_FSCRYPT_POLICY' "$B"
+
+          M=$(find bootable/recovery -path '*fscrypt*' -name 'Android.mk' | head -1)
+          echo "fscrypt Android.mk = $M"
+          if [ -n "$M" ]; then
+            echo "===== 现有模块 ====="
+            grep -n 'LOCAL_MODULE' "$M" || true
+            echo "===== 目录 ====="
+            ls -l "$(dirname "$M")" | head -40
+            if ! grep -q 'twrpfbe' "$M"; then
+              python3 - "$M" <<'PYEOF'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8', errors='replace').read()
+          block = '''
+          include $(CLEAR_VARS)
+          LOCAL_MODULE := twrpfbe
+          LOCAL_MODULE_TAGS := optional
+          LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
+          LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/system/bin
+          LOCAL_SRC_FILES := main.cpp
+          LOCAL_SHARED_LIBRARIES := libtwrpfscrypt
+          include $(BUILD_EXECUTABLE)
+
+          '''
+          if s.rstrip().endswith('endif'):
+              i = s.rstrip().rfind('endif')
+              s = s[:i] + block + s[i:]
+          else:
+              s = s + block
+          open(p, 'w', encoding='utf-8').write(s)
+          print('twrpfbe 模块已写入')
+          PYEOF
+            fi
+            echo "===== 追加后的尾部 ====="
+            tail -25 "$M"
+          else
+            echo "!! 没找到 fscrypt 的 Android.mk，列一下候选目录"
+            find bootable/recovery -maxdepth 3 -type d | head -40
+          fi
 
       - name: 给 recovery 域补 SELinux 权限（TWRP 必须能读 /data/unencrypted）
         run: |
@@ -127,34 +177,22 @@ jobs:
             {
               echo ''
               echo '# ==== HWDBY: 让 TWRP 的 recovery 域能读 /data/unencrypted (FBE 的 DE 密钥) ===='
-              echo '# 实测: /data/unencrypted 的 label 是 u:object_r:unencrypted_data_file:s0,'
-              echo '#       而 recovery 域即使 uid=0 也被 SELinux 拒 (EACCES) =>'
-              echo '#       TWPartition::Decrypt_FBE_DE() 的 Path_Exists("/data/unencrypted/key/version")'
-              echo '#       返回 false, 整段 FBE 解密被跳过.'
               echo 'allow recovery unencrypted_data_file:dir { getattr search open read };'
               echo 'allow recovery unencrypted_data_file:file { getattr open read map };'
               echo 'allow recovery unencrypted_data_file:lnk_file { getattr read };'
-              echo ''
-              echo '# ==== HWDBY: 让 recovery 域能直接访问 TEE (keymaster 的 wrappedkey 必须用) ===='
-              echo '# 实测: /dev/qseecom 与 /dev/smcinvoke 的真实 label 是 u:object_r:tee_device:s0'
-              echo '#       (在 AOSP public/tee.te 里定义, 是 public 类型 => plat 策略可以直接引用,'
-              echo '#        不会与 vendor 策略冲突). recovery 域 stat/open 它都被拒 (EPERM).'
+              echo '# ==== HWDBY: recovery 域访问 TEE (keymaster wrappedkey) ===='
               echo 'allow recovery tee_device:chr_file { open read write ioctl getattr map };'
-              echo ''
-              echo '# ==== HWDBY: recovery 域当 keymaster 的 HAL client (binder 调用 + 找 hwservice) ===='
-              echo '# 展开就是 allow recovery hal_keymaster:binder { call transfer };'
-              echo '#           allow recovery hal_keymaster_hwservice:hwservice_manager find;'
+              echo '# ==== HWDBY: recovery 域当 keymaster 的 HAL client ===='
               echo 'hal_client_domain(recovery, hal_keymaster)'
             } >> "$F"
             echo "===== patched $F ====="
-            tail -20 "$F"
+            tail -15 "$F"
           else
-            echo "!! 找不到 $F, 列一下 system/sepolicy 结构"
+            echo "!! 找不到 $F"
             ls system/sepolicy 2>/dev/null | head -30
-            find system/sepolicy -name '*.te' 2>/dev/null | grep -i -E 'recovery|file' | head -20
           fi
 
-      - name: 编译 recovery.img
+      - name: 编译 recovery.img + twrpfbe
         run: |
           set -o pipefail
           cd "$HOME/tree"
@@ -162,31 +200,46 @@ jobs:
           export LC_ALL=C
           source build/envsetup.sh
           lunch orangefox_HWDBY-eng
-          mka recoveryimage -j"$(nproc --all)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
-          echo "=== 产物大小 ==="
+          mka recoveryimage twrpfbe -j"$(nproc --all)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          echo "=== 产物 ==="
           ls -l out/target/product/HWDBY/recovery.img || true
-          ls -l out/target/product/HWDBY/ramdisk-recovery.img || true
-          ls -l out/target/product/HWDBY/ramdisk-recovery.img.gz 2>/dev/null || true
+          ls -l out/target/product/HWDBY/recovery/root/system/bin/twrpfbe || true
 
       - name: 校验产物确实带 crypto
         if: always()
         run: |
           cd "$HOME/tree" || exit 0
           {
-            echo "=== recovery 二进制位置 ==="
-            find out/target/product/HWDBY -type f -name recovery 2>/dev/null | head -20
             echo "=== recovery 二进制里的 crypto 痕迹 ==="
             for f in $(find out/target/product/HWDBY -type f -name recovery 2>/dev/null | head -5); do
               echo "--- $f"
-              strings -a "$f" | grep -c -E "FBE found but FBE support not present" || true
-              strings -a "$f" | grep -n -E "File Based Encryption is present|Keymaster_Ver|TW_INCLUDE_CRYPTO|keystore2|synthetic password" | head -20 || true
+              strings -a "$f" | grep -n -E "File Based Encryption is present|Keymaster_Ver|TW_INCLUDE_CRYPTO" | head -10 || true
             done
-            echo "=== ramdisk 里的 crypto 相关文件 ==="
-            ls out/target/product/HWDBY/recovery/root/system/lib64 2>/dev/null | grep -i -E "keystore|keymaster|fscrypt|vold" || true
+            echo "=== ramdisk 里的 crypto 文件 ==="
             ls out/target/product/HWDBY/recovery/root/system/bin 2>/dev/null | grep -i -E "keystore|fscrypt|twrpfbe" || true
-            echo "=== fstab 是否进了 ramdisk ==="
-            grep -n "/data" out/target/product/HWDBY/recovery/root/system/etc/recovery.fstab 2>/dev/null || true
+            echo "=== twrpfbe 详情 ==="
+            ls -l out/target/product/HWDBY/recovery/root/system/bin/twrpfbe 2>/dev/null || echo "(没有 twrpfbe)"
+            echo "=== 是否用了 fscrypt V1 ==="
+            strings -a out/target/product/HWDBY/recovery/root/system/lib64/libtwrpfscrypt.so 2>/dev/null | grep -i -E "fscrypt_policy_v1|fscrypt_policy_v2|V1|V2" | head -10 || true
           } 2>&1 | tee "$GITHUB_WORKSPACE/crypto-check.log"
+
+      - name: 打包 crypto 运行文件（twrpfbe + 库 + 关键二进制）
+        if: always()
+        run: |
+          cd "$HOME/tree" || exit 0
+          R=out/target/product/HWDBY/recovery/root
+          W="$GITHUB_WORKSPACE/crypto-run"
+          rm -rf "$W"; mkdir -p "$W/system/bin" "$W/system/lib64"
+          for b in recovery keystore keystore_auth twrpfbe fscryptpolicyget keystore_cli_v2 linker64; do
+            if [ -f "$R/system/bin/$b" ]; then cp -a "$R/system/bin/$b" "$W/system/bin/"; fi
+          done
+          cp -a "$R/system/lib64/." "$W/system/lib64/" 2>/dev/null || true
+          cp -a "$R/etc/recovery.fstab" "$W/recovery.fstab" 2>/dev/null || true
+          cp -a "$R/system/etc/ld.config.txt" "$W/ld.config.txt" 2>/dev/null || true
+          echo "=== bin ==="; ls -l "$W/system/bin" || true
+          echo "=== lib64 数量 ==="; ls "$W/system/lib64" | wc -l || true
+          (cd "$GITHUB_WORKSPACE" && tar -czf crypto-run.tgz crypto-run) || true
+          ls -l "$GITHUB_WORKSPACE/crypto-run.tgz" || true
 
       - name: 上传编译日志（失败时也能看）
         if: always()
@@ -198,13 +251,14 @@ jobs:
             crypto-check.log
           if-no-files-found: warn
 
-      - name: 上传 recovery.img（含 ramdisk，便于按本机格式重打包）
+      - name: 上传产物
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: recovery-HWDBY
           path: |
             ~/tree/out/target/product/HWDBY/recovery.img
             ~/tree/out/target/product/HWDBY/ramdisk-recovery.img
-            ~/tree/out/target/product/HWDBY/ramdisk-recovery.img.gz
             ~/tree/out/target/product/HWDBY/kernel
+            crypto-run.tgz
           if-no-files-found: warn
