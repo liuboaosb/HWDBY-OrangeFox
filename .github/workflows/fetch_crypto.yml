@@ -1,9 +1,13 @@
 name: Fetch crypto mini files from a run
 
 # 用途：某个编译 run 的产物很大（recovery.img + kernel + ramdisk ≈ 87 MB），
-# 但本地真正需要的只有 crypto-run.tgz 里的几个小文件（twrpfbe + libtwrpfscrypt + libfscrypt）。
-# 这个工作流不编译任何东西，只让 GitHub 的机器把大产物拉下来、挑出小文件再上传，
-# 本地就能只下载几百 KB。支持重复运行（默认对着 37613451565 这个 run）。
+# 本地真正需要的只有 crypto-run.tgz 里的几个小文件（twrpfbe + libtwrpfscrypt + libfscrypt）。
+# 本工作流不编译，只让 GitHub 的机器把大产物拉下来、挑出小文件重新打包上传。
+#
+# 注意：编译工作流上传时用了 ~/tree/... 这种路径，产物 zip 内部结构是
+#   tree/out/target/product/HWDBY/...
+#   work/<repo>/<repo>/crypto-run.tgz
+# 所以这里必须用 find 定位，不能写死路径。
 
 on:
   workflow_dispatch:
@@ -26,39 +30,49 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: art
 
+      - name: 先看清产物内部结构
+        run: |
+          echo "===== art 顶层 ====="
+          ls -l art || true
+          echo "===== 所有文件（前 80 个）====="
+          find art -type f | head -80 || true
+          echo "===== 找关键文件 ====="
+          find art -name 'crypto-run.tgz' -o -name 'ramdisk-recovery.img' -o -name 'recovery.img' | head -10 || true
+          du -sh art/* 2>/dev/null || true
+
       - name: 解包并挑出需要的文件
         run: |
-          set -e
-          ls -l art
-          ls -l art/crypto-run.tgz
-          tar -xzf art/crypto-run.tgz -C .
+          set -x
+          CR=$(find art -name 'crypto-run.tgz' | head -1)
+          echo "crypto-run.tgz = $CR"
+          if [ -z "$CR" ]; then echo "!! 没找到 crypto-run.tgz"; exit 0; fi
+          tar -xzf "$CR" -C .
           echo "===== crypto-run 内容 ====="
           ls -l crypto-run/system/bin || true
-          echo "===== 关键文件 ====="
-          for f in twrpfbe libtwrpfscrypt.so libfscrypt.so; do
-            find crypto-run -name "$f" -exec ls -l {} \; || true
-          done
+          ls crypto-run/system/lib64 | wc -l || true
           mkdir -p mini/system/bin mini/system/lib64
-          cp crypto-run/system/bin/twrpfbe mini/system/bin/
           for f in twrpfbe recovery keystore keystore_auth fscryptpolicyget linker64; do
             if [ -f "crypto-run/system/bin/$f" ]; then cp "crypto-run/system/bin/$f" mini/system/bin/; fi
           done
-          cp crypto-run/system/lib64/libtwrpfscrypt.so mini/system/lib64/
-          cp crypto-run/system/lib64/libfscrypt.so     mini/system/lib64/ 2>/dev/null || true
+          for f in libtwrpfscrypt.so libfscrypt.so; do
+            if [ -f "crypto-run/system/lib64/$f" ]; then cp "crypto-run/system/lib64/$f" mini/system/lib64/; fi
+          done
           cp crypto-run/recovery.fstab mini/recovery.fstab 2>/dev/null || true
+          cp crypto-run/ld.config.txt mini/ld.config.txt 2>/dev/null || true
           tar -czf crypto-mini.tgz mini
-          ls -l crypto-mini.tgz
           echo "===== mini 内容 ====="
-          tar -tzf crypto-mini.tgz
-          echo "===== twrpfbe 的 sha256 / md5（便于本地校验）====="
-          sha256sum mini/system/bin/twrpfbe
-          md5sum mini/system/bin/twrpfbe crypto-mini.tgz
-          echo "===== 需要的库闭包（mini 里没带的，本地从旧包拿）====="
-          strings -a mini/system/bin/twrpfbe | grep -E '^lib.*\.so$' | sort -u || true
+          tar -tzf crypto-mini.tgz || true
+          ls -l crypto-mini.tgz || true
+          echo "===== 校验值（本地对账用）====="
+          sha256sum mini/system/bin/twrpfbe 2>/dev/null || true
+          md5sum mini/system/bin/twrpfbe crypto-mini.tgz 2>/dev/null || true
+          echo "===== twrpfbe 直接依赖 ====="
+          strings -a mini/system/bin/twrpfbe 2>/dev/null | grep -E '^lib.*\.so' | sort -u || true
 
       - name: 上传小包
         uses: actions/upload-artifact@v4
         with:
           name: crypto-mini
-          path: crypto-mini.tgz
+          path: |
+            crypto-mini.tgz
           if-no-files-found: error
