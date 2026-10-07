@@ -134,9 +134,20 @@ jobs:
               echo 'allow recovery unencrypted_data_file:dir { getattr search open read };'
               echo 'allow recovery unencrypted_data_file:file { getattr open read map };'
               echo 'allow recovery unencrypted_data_file:lnk_file { getattr read };'
+              echo ''
+              echo '# ==== HWDBY: 让 recovery 域能直接访问 TEE (keymaster 的 wrappedkey 必须用) ===='
+              echo '# 实测: /dev/qseecom 与 /dev/smcinvoke 的真实 label 是 u:object_r:tee_device:s0'
+              echo '#       (在 AOSP public/tee.te 里定义, 是 public 类型 => plat 策略可以直接引用,'
+              echo '#        不会与 vendor 策略冲突). recovery 域 stat/open 它都被拒 (EPERM).'
+              echo 'allow recovery tee_device:chr_file { open read write ioctl getattr map };'
+              echo ''
+              echo '# ==== HWDBY: recovery 域当 keymaster 的 HAL client (binder 调用 + 找 hwservice) ===='
+              echo '# 展开就是 allow recovery hal_keymaster:binder { call transfer };'
+              echo '#           allow recovery hal_keymaster_hwservice:hwservice_manager find;'
+              echo 'hal_client_domain(recovery, hal_keymaster)'
             } >> "$F"
             echo "===== patched $F ====="
-            tail -12 "$F"
+            tail -20 "$F"
           else
             echo "!! 找不到 $F, 列一下 system/sepolicy 结构"
             ls system/sepolicy 2>/dev/null | head -30
