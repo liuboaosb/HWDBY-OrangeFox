@@ -118,6 +118,31 @@ jobs:
           cp -a "$HOME/devtree/device/huawei" "$HOME/tree/device/"
           ls -l "$HOME/tree/device/huawei/HWDBY"
 
+      - name: 给 recovery 域补 SELinux 权限（TWRP 必须能读 /data/unencrypted）
+        run: |
+          set -e
+          cd "$HOME/tree"
+          F="system/sepolicy/private/recovery.te"
+          if [ -f "$F" ]; then
+            {
+              echo ''
+              echo '# ==== HWDBY: 让 TWRP 的 recovery 域能读 /data/unencrypted (FBE 的 DE 密钥) ===='
+              echo '# 实测: /data/unencrypted 的 label 是 u:object_r:unencrypted_data_file:s0,'
+              echo '#       而 recovery 域即使 uid=0 也被 SELinux 拒 (EACCES) =>'
+              echo '#       TWPartition::Decrypt_FBE_DE() 的 Path_Exists("/data/unencrypted/key/version")'
+              echo '#       返回 false, 整段 FBE 解密被跳过.'
+              echo 'allow recovery unencrypted_data_file:dir { getattr search open read };'
+              echo 'allow recovery unencrypted_data_file:file { getattr open read map };'
+              echo 'allow recovery unencrypted_data_file:lnk_file { getattr read };'
+            } >> "$F"
+            echo "===== patched $F ====="
+            tail -12 "$F"
+          else
+            echo "!! 找不到 $F, 列一下 system/sepolicy 结构"
+            ls system/sepolicy 2>/dev/null | head -30
+            find system/sepolicy -name '*.te' 2>/dev/null | grep -i -E 'recovery|file' | head -20
+          fi
+
       - name: 编译 recovery.img
         run: |
           set -o pipefail
