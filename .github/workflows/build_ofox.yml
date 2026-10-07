@@ -5,11 +5,14 @@ name: Build OrangeFox Recovery (HWDBY)
 #   1) .github/workflows/build_ofox.yml   (本文件)
 #   2) HWDBY_device_tree.zip              (设备树，21.6 MB)
 #
-# 修正记录（第一次运行失败：OrangeFox/sync 没有 11.0 分支）：
-#   设备树的 orangefox_HWDBY.mk 只 inherit 了 vendor/twrp/config/common.mk，
-#   并不需要 vendor/orangefox，所以用 TWRP 的 AOSP 清单 + twrp-11 分支即可。
-#   清单：https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
-#   分支：twrp-11 / twrp-12.1 / twrp-14.1
+# v2 (crypto 版): 设备树已加 TW_INCLUDE_CRYPTO := true + recovery.fstab 的 /data
+#   加密标志 (fileencryption=ice;wrappedkey;keydirectory=/data/unencrypted)。
+#   本文件新增两步：
+#     - "dump crypto 配置": 把进入编译的 crypto 相关旗标打进日志（即使编译失败也能看）
+#     - "校验产物确实带 crypto": 在 recovery 二进制与 ramdisk 里找 FBE/keystore 痕迹
+#
+# 清单：https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+# 分支：twrp-11 / twrp-12.1 / twrp-14.1
 
 on:
   workflow_dispatch:
@@ -21,9 +24,9 @@ on:
         type: choice
         options: [twrp, orangefox]
       branch:
-        description: '安卓版本（11 / 12.1 / 14.1），留 11 即可'
+        description: '安卓版本（11 / 12.1 / 14.1）'
         required: true
-        default: '11'
+        default: '12.1'
 
 jobs:
   build:
@@ -67,6 +70,13 @@ jobs:
           ls -l "$HOME/devtree/device/huawei/HWDBY"
           ls -l "$HOME/devtree/device/huawei/HWDBY/prebuilt"
 
+      - name: dump 设备树里的 crypto 配置
+        run: |
+          echo "===== BoardConfig.mk crypto 行 ====="
+          grep -n -i -E "crypto|fbe|fscrypt|keymaster|keystore" "$HOME/devtree/device/huawei/HWDBY/BoardConfig.mk" || echo "(none)"
+          echo "===== recovery.fstab /data 行 ====="
+          grep -n "/data" "$HOME/devtree/device/huawei/HWDBY/recovery.fstab" || true
+
       - name: 同步源码
         env:
           SRC: ${{ inputs.source }}
@@ -83,7 +93,7 @@ jobs:
               9|9.0|fox_9.0)                BR="fox_9.0" ;;
             esac
           else
-            # TWRP AOSP 清单：有 twrp-11（Android 11，与本设备树匹配）
+            # TWRP AOSP 清单
             MANIFEST="https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git"
             case "$BR" in
               11|11.0|android-11|twrp-11)   BR="twrp-11" ;;
@@ -97,6 +107,11 @@ jobs:
           mkdir -p "$HOME/tree" && cd "$HOME/tree"
           repo init --depth=1 -u "$MANIFEST" -b "$BR"
           repo sync -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags
+          echo "===== 源码树里的 crypto 旗标处理 ====="
+          grep -rn "TW_INCLUDE_CRYPTO" vendor/twrp/config/*.mk bootable/recovery/Android.mk 2>/dev/null | head -40 || true
+          echo "===== 源码树里的 crypto/fscrypt 目录 ====="
+          ls bootable/recovery/crypto 2>/dev/null || true
+          ls bootable/recovery/crypto/fscrypt 2>/dev/null | head -40 || true
 
       - name: 放入设备树
         run: |
@@ -117,12 +132,34 @@ jobs:
           ls -l out/target/product/HWDBY/ramdisk-recovery.img || true
           ls -l out/target/product/HWDBY/ramdisk-recovery.img.gz 2>/dev/null || true
 
+      - name: 校验产物确实带 crypto
+        if: always()
+        run: |
+          cd "$HOME/tree" || exit 0
+          {
+            echo "=== recovery 二进制位置 ==="
+            find out/target/product/HWDBY -type f -name recovery 2>/dev/null | head -20
+            echo "=== recovery 二进制里的 crypto 痕迹 ==="
+            for f in $(find out/target/product/HWDBY -type f -name recovery 2>/dev/null | head -5); do
+              echo "--- $f"
+              strings -a "$f" | grep -c -E "FBE found but FBE support not present" || true
+              strings -a "$f" | grep -n -E "File Based Encryption is present|Keymaster_Ver|TW_INCLUDE_CRYPTO|keystore2|synthetic password" | head -20 || true
+            done
+            echo "=== ramdisk 里的 crypto 相关文件 ==="
+            ls out/target/product/HWDBY/recovery/root/system/lib64 2>/dev/null | grep -i -E "keystore|keymaster|fscrypt|vold" || true
+            ls out/target/product/HWDBY/recovery/root/system/bin 2>/dev/null | grep -i -E "keystore|fscrypt|twrpfbe" || true
+            echo "=== fstab 是否进了 ramdisk ==="
+            grep -n "/data" out/target/product/HWDBY/recovery/root/system/etc/recovery.fstab 2>/dev/null || true
+          } 2>&1 | tee "$GITHUB_WORKSPACE/crypto-check.log"
+
       - name: 上传编译日志（失败时也能看）
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: |
+            build.log
+            crypto-check.log
           if-no-files-found: warn
 
       - name: 上传 recovery.img（含 ramdisk，便于按本机格式重打包）
